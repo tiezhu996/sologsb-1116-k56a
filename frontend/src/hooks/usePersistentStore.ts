@@ -4,20 +4,40 @@ import Dexie, { type Table } from 'dexie'
 import type { CollectPoint, FungusRecord, IdentifyLog, SporePrint } from '@/types'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
   value: number
 }
 
-/** Dexie 封装：条目 / 孢子印 / 采集点 / 鉴定结论 四张表 + 元数据表 */
+/** 离线合并会话：检查点与暂存采集包都落在 IndexedDB，失败后可恢复 */
+export interface MergeSessionRow {
+  id: string
+  filename: string
+  createdAt: string
+  updatedAt: string
+  /** reviewing=逐项确认中 / writing=已开始按检查点写入 / done=完成 / failed=写入中断（可恢复） */
+  status: 'reviewing' | 'writing' | 'done' | 'failed'
+  formatVersion: number
+  sourceName: string
+  /** 兼容读写留痕（旧包补字段等） */
+  compat: unknown
+  /** 暂存后的逐项决策清单（utils/merge 的 StagedItem 序列化） */
+  items: unknown[]
+  /** 检查点：已确认写入正式数据的暂存行 key，恢复时跳过，绝不重复写入 */
+  checkpoint: string[]
+  error: string
+}
+
+/** Dexie 封装：条目 / 孢子印 / 采集点 / 鉴定结论 四张表 + 元数据 + 离线合并会话表 */
 class FungiGuideDb extends Dexie {
   records!: Table<FungusRecord, string>
   spores!: Table<SporePrint, string>
   points!: Table<CollectPoint, string>
   identifies!: Table<IdentifyLog, string>
   meta!: Table<MetaRow, string>
+  mergeSessions!: Table<MergeSessionRow, string>
 
   constructor() {
     super('gbfungiguide')
@@ -29,7 +49,7 @@ class FungiGuideDb extends Dexie {
       meta: 'key'
     })
     // v2：新增「菌肉变色反应」字段，迁移时为历史条目补齐默认值（不变色）
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         records: 'id, code, pointId, attachment, capShape',
         spores: 'id, recordId, color, observeDate',
@@ -47,6 +67,15 @@ class FungiGuideDb extends Dexie {
             }
           })
       })
+    // v3：新增离线合并会话表（检查点 + 暂存包），旧库仅追加表，无需数据迁移
+    this.version(SCHEMA_VERSION).stores({
+      records: 'id, code, pointId, attachment, capShape',
+      spores: 'id, recordId, color, observeDate',
+      points: 'id, name, substrate, vegetation',
+      identifies: 'id, recordId, conclusion, date',
+      meta: 'key',
+      mergeSessions: 'id, status, updatedAt'
+    })
   }
 }
 

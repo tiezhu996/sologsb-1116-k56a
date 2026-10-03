@@ -36,7 +36,7 @@ FRONTEND_PORT=21816
 | 状态管理 | Zustand（`zustand/vanilla` createStore + Vue 响应式桥接） |
 | 路由 | Vue Router 4（History 模式，nginx `try_files` 回落） |
 | 构建 | Vite 6 |
-| 本地存储 | IndexedDB（Dexie 封装，含 `schemaVersion` 与升级迁移） |
+| 本地存储 | IndexedDB（Dexie 封装，含 `schemaVersion`、升级迁移与合并检查点） |
 | 部署 | 多阶段 Dockerfile：`node:20-alpine` 构建 → `nginx:alpine` 托管 |
 
 ## 三、本地开发
@@ -44,8 +44,9 @@ FRONTEND_PORT=21816
 ```bash
 cd frontend
 npm install
-npm run dev        # http://localhost:21816
-npm run build      # 类型检查 + 生产构建
+npm run dev          # http://localhost:21816
+npm run build        # 类型检查 + 生产构建
+npm run test:merge   # 离线合并引擎与检查点恢复的 Node 测试
 ```
 
 ## 四、目录结构
@@ -60,12 +61,12 @@ sologsb-1116/
 │   ├── public/favicon.svg
 │   └── src/
 │       ├── types/              # record.ts / spore.ts / point.ts / identify.ts / index.ts
-│       ├── stores/             # recordStore / sporeStore / pointStore / identifyStore（Zustand）
+│       ├── stores/             # recordStore / sporeStore / pointStore / identifyStore / mergeStore（Zustand）
 │       ├── components/common/  # SporePrintSwatch / TraitsSummary / GillAttachmentTag / GeoPointForm
 │       ├── hooks/              # usePersistentStore / useCandidateMatch
-│       ├── pages/              # AtlasPage / RecordDetailPage / PointsPage / IdentifyPage / ComparePage
+│       ├── pages/              # AtlasPage / RecordDetailPage / PointsPage / IdentifyPage / ComparePage / MergePage
 │       ├── router/index.ts
-│       └── utils/              # spore.ts / export.ts / id.ts
+│       └── utils/              # spore.ts / export.ts / id.ts / merge.ts（离线合并引擎）
 ```
 
 ## 五、数据模型与存储
@@ -79,6 +80,7 @@ sologsb-1116/
 
 - 数据库名 `gbfungiguide`，`meta` 表保存 `schemaVersion`；
 - `version(2)` 升级迁移会为历史条目补齐「菌肉变色反应」默认值（不变色）；
+- `version(3)` 新增 `mergeSessions` 表，保存离线合并的暂存清单、逐项决策与写入检查点；
 - 数据仅存于浏览器本地，容器无状态、不挂载命名卷。
 
 ## 六、主要页面
@@ -90,8 +92,24 @@ sologsb-1116/
 | `/points` | 采集点管理：经纬度格式校验、条目数与主要基物统计、删除前校验下级条目 |
 | `/identify` | 鉴定工作页：左侧勾选形态特征与印色，右侧实时给出候选名录排序，确认后落鉴定结论 |
 | `/compare` | 条目对比：并排最多 3 条，逐项对照菌盖/菌褶菌管/孢子印差异并高亮 |
+| `/merge` | 离线合并：校验暂存各分组采集包，逐项确认后按「采集点→菌物条目→孢子印→鉴定结论」并入 |
 
-## 七、候选排序规则
+## 七、离线合并采集包（分组调查）
+
+野外分组离线记录后，在「离线合并」页把各组的采集包并入本地图谱，流程分两步：
+
+1. **校验并暂存**：上传采集包 JSON 后只做解析、兼容与比对，绝不写正式数据；
+   - 旧版本采集包缺少新字段（如 v1 包缺「菌肉变色反应」）时按当前版本默认值**兼容读写**并逐条留痕提示；
+   - 枚举值越界、经纬度非法、缺主键等问题会列入暂存清单并默认阻断，需明确「跳过」或修正源数据；
+   - 采集点按 id（id 不同时按同名地点兜底）、菌物条目按**采集编号**、孢子印与鉴定按 id 与本地比对，分为「新增 / 内容一致 / 编号冲突」。
+2. **逐项确认后写入**：同一采集编号内容不同时，可选择「并入（覆盖本地）」「跳过（保留本地）」或「保留两边」（后者以新 id、编号加「（并入）」后缀入库，两个版本都保留）；**未逐项确认或仍被外键/撞号守卫阻断的行不能进入正式数据**。内容一致的行默认跳过，避免重复写入。
+
+- 写入严格按 **采集点 → 菌物条目 → 孢子印 → 鉴定结论** 顺序进行，子表外键（`pointId`/`recordId`）会随「保留两边/覆盖」的最终 id 自动改写；
+- 每一行的写入与**检查点**在同一 IndexedDB 事务内提交：中断后会话标记为「中断待恢复」，再次执行从检查点继续，已确认写入的部分**不会重复写入**；
+- 暂存清单、决策与检查点保存在 `mergeSessions` 表（schema v3），刷新或重开浏览器后可继续；页面可随时导出本机采集包供他组并入。
+- 合并引擎纯函数与检查点恢复有 Node 测试：`cd frontend && npm run test:merge`。
+
+## 八、候选排序规则
 
 - 权重：着生方式 26、孢子印 22、菌盖形状 12、表面质地 10、菌褶密度 10、菌盖边缘 8、菌肉反应 8、关联树种 4；
 - 印色与条目着生方式若属于该印色的先验组合（如白色↔离生/弯生），计半分；
