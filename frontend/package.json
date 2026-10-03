@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
-    "preview": "vite preview --port 21816"
+    "preview": "vite preview --port 21816",
+    "test:merge": "esbuild scripts/test-merge.mts --bundle --platform=node --format=esm --outfile=scripts/.test-merge.mjs && node scripts/.test-merge.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",

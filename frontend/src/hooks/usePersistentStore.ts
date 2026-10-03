@@ -1,23 +1,24 @@
 import { onUnmounted, reactive } from 'vue'
 import type { StoreApi } from 'zustand/vanilla'
 import Dexie, { type Table } from 'dexie'
-import type { CollectPoint, FungusRecord, IdentifyLog, SporePrint } from '@/types'
+import type { CollectPoint, FungusRecord, IdentifyLog, MergeSession, SporePrint } from '@/types'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
   value: number
 }
 
-/** Dexie 封装：条目 / 孢子印 / 采集点 / 鉴定结论 四张表 + 元数据表 */
+/** Dexie 封装：条目 / 孢子印 / 采集点 / 鉴定结论 四张表 + 元数据表 + 离线合并会话表 */
 class FungiGuideDb extends Dexie {
   records!: Table<FungusRecord, string>
   spores!: Table<SporePrint, string>
   points!: Table<CollectPoint, string>
   identifies!: Table<IdentifyLog, string>
   meta!: Table<MetaRow, string>
+  mergeSessions!: Table<MergeSession, string>
 
   constructor() {
     super('gbfungiguide')
@@ -47,6 +48,15 @@ class FungiGuideDb extends Dexie {
             }
           })
       })
+    // v3：新增离线合并会话表，暂存采集包与写入检查点；旧表结构不变
+    this.version(SCHEMA_VERSION).stores({
+      records: 'id, code, pointId, attachment, capShape',
+      spores: 'id, recordId, color, observeDate',
+      points: 'id, name, substrate, vegetation',
+      identifies: 'id, recordId, conclusion, date',
+      meta: 'key',
+      mergeSessions: 'id, status, packageHash, updatedAt'
+    })
   }
 }
 

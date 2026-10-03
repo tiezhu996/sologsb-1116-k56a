@@ -59,13 +59,14 @@ sologsb-1116/
 │   ├── nginx.conf              # try_files 前端路由回落 + gzip
 │   ├── public/favicon.svg
 │   └── src/
-│       ├── types/              # record.ts / spore.ts / point.ts / identify.ts / index.ts
-│       ├── stores/             # recordStore / sporeStore / pointStore / identifyStore（Zustand）
+│       ├── types/              # record.ts / spore.ts / point.ts / identify.ts / merge.ts / index.ts
+│       ├── stores/             # recordStore / sporeStore / pointStore / identifyStore / mergeStore（Zustand）
 │       ├── components/common/  # SporePrintSwatch / TraitsSummary / GillAttachmentTag / GeoPointForm
 │       ├── hooks/              # usePersistentStore / useCandidateMatch
-│       ├── pages/              # AtlasPage / RecordDetailPage / PointsPage / IdentifyPage / ComparePage
+│       ├── pages/              # AtlasPage / RecordDetailPage / PointsPage / IdentifyPage / ComparePage / MergePage
 │       ├── router/index.ts
-│       └── utils/              # spore.ts / export.ts / id.ts
+│       ├── scripts/            # 离线合并引擎逻辑测试（npm run test:merge）
+│       └── utils/              # spore.ts / export.ts / merge.ts / id.ts
 ```
 
 ## 五、数据模型与存储
@@ -76,9 +77,11 @@ sologsb-1116/
 | SporePrint 孢子印 | 印色、印形、获取时长、观察日期、样本干湿度 | `spores` |
 | CollectPoint 采集点 | 地点名、经纬度、海拔、植被类型、基物、伴生树种、日期、采集人 | `points` |
 | IdentifyLog 鉴定结论 | 结论学名、依据、参考图鉴与页码、置信度、是否待复核、复核人 | `identifies` |
+| MergeSession 合并会话 | 暂存采集包、逐项确认状态、写入检查点（断点续传） | `mergeSessions` |
 
 - 数据库名 `gbfungiguide`，`meta` 表保存 `schemaVersion`；
 - `version(2)` 升级迁移会为历史条目补齐「菌肉变色反应」默认值（不变色）；
+- `version(3)` 新增 `mergeSessions` 表保存离线合并的暂存计划与检查点，旧表结构不变；
 - 数据仅存于浏览器本地，容器无状态、不挂载命名卷。
 
 ## 六、主要页面
@@ -90,9 +93,44 @@ sologsb-1116/
 | `/points` | 采集点管理：经纬度格式校验、条目数与主要基物统计、删除前校验下级条目 |
 | `/identify` | 鉴定工作页：左侧勾选形态特征与印色，右侧实时给出候选名录排序，确认后落鉴定结论 |
 | `/compare` | 条目对比：并排最多 3 条，逐项对照菌盖/菌褶菌管/孢子印差异并高亮 |
+| `/merge` | 离线合并：校验并暂存其他小组采集包，逐项确认后并入本地图谱（支持检查点恢复与旧包兼容） |
 
 ## 七、候选排序规则
 
 - 权重：着生方式 26、孢子印 22、菌盖形状 12、表面质地 10、菌褶密度 10、菌盖边缘 8、菌肉反应 8、关联树种 4；
 - 印色与条目着生方式若属于该印色的先验组合（如白色↔离生/弯生），计半分；
 - 排序先比总分，总分相同则优先展示着生方式一致的条目。
+
+## 八、离线合并（野外分组回库）
+
+野外小组各自离线记录，回库后在「离线合并」页导入采集包（`/merge` 页可直接导出当前图谱采集包，含「旧版兼容包」用于演示）。
+
+合并流程严格按以下规则执行：
+
+1. **先校验并暂存**：采集包必须带 `kind = gbfungiguide-collection-package` 标识；JSON 结构、枚举取值、经纬度、外键引用逐项校验。结构不合法直接拒绝；单行问题标记为「不予导入」，其余正常暂存。暂存计划与会话整体写入 `mergeSessions` 表。
+2. **固定顺序写入**：采集点 → 菌物条目 → 孢子印 → 鉴定结论，外键在写入时按阶段重映射（外部版本换新 ID，菌物条目保留原采集编号）。
+3. **逐项确认，未确认不入库**：
+   - 内容一致 → 自动跳过，不重复写入；
+   - 本地不存在 → 新增，可批量勾选；
+   - 同一采集编号（采集点/孢子印/鉴定结论按 id）内容不同 → **保留两边版本**，展示逐字段差异，必须逐项手动勾选确认；
+   - 校验失败 → 不可勾选，不能进入正式数据。
+4. **检查点恢复**：每成功写入一条立即推进检查点（`lastItemKey` / `writtenCount`）。写入中断（崩溃/异常）后重新进入页面即可从检查点继续，已 `written` 的条目自动跳过，**不会重复写入已经确认的部分**；上次因 IO 失败的条目在重放时自动重试。
+5. **旧版本采集包兼容读写**：缺少 `packageVersion` 或版本较低时，缺失字段（如历史上的 `fleshReaction`、`needReview`）按默认值补齐并在条目上逐条标注；仅因兼容补齐而产生的差异不计为冲突。无法识别的多余字段忽略并提示。
+6. 合并写入只操作四张正式表；写入后图谱总览、条目详情、鉴定工作页、候选排序与 JSON/CSV 导出照常使用，无感知变化。
+
+采集包格式：
+
+```json
+{
+  "kind": "gbfungiguide-collection-package",
+  "packageVersion": 1,
+  "exportedAt": "ISO 时间",
+  "group": "分组名称",
+  "points": [],
+  "records": [],
+  "spores": [],
+  "identifies": []
+}
+```
+
+合并引擎为纯函数，配套逻辑测试：`cd frontend && npm run test:merge`。
